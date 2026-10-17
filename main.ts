@@ -1,5 +1,5 @@
 // ============================================================
-// IPTV Proxy — Deno Deploy
+// IPTV Proxy — Deno Deploy (v2 - TLS Retry Fix)
 // Tek bağlantı prensibi: yayıncıya giden istek Deno isolate'inden
 // tek IP olarak gider. Tüm izleyiciler aynı cache'lenmiş manifesti alır.
 // FFmpeg yok — kaynak m3u8 doğrudan proxy'lenir.
@@ -46,6 +46,26 @@ const pendingManifest: Record<string, Promise<string> | null> = {};
 const pendingSegment: Record<string, Promise<Uint8Array> | null> = {};
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// ------------------------------------------------------------
+// TLS Kapanış Hatası İçin Retry Mekanizması
+// Deno bazen "error reading a body from connection" hatası verir.
+// Bu fonksiyon, hatayı alınca isteği birkaç kez tekrar dener.
+// ------------------------------------------------------------
+async function fetchWithRetry(url: string, options?: RequestInit, maxRetries = 3): Promise<Response> {
+  let lastError: Error | null = null;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fetch(url, options);
+    } catch (e) {
+      lastError = e as Error;
+      console.warn(`Fetch denemesi ${i + 1}/${maxRetries} başarısız (${url}): ${lastError.message}`);
+      // Kısa bir bekleme sonrası tekrar dene
+      await sleep(200 * (i + 1));
+    }
+  }
+  throw lastError;
+}
 
 // ------------------------------------------------------------
 // Auth
@@ -128,7 +148,8 @@ async function fetchManifest(url: string, cacheKey: string): Promise<string> {
   if (pendingManifest[cacheKey]) return await pendingManifest[cacheKey]!;
 
   pendingManifest[cacheKey] = (async () => {
-    const resp = await fetch(url, { headers: { "User-Agent": UA, "Accept": "*/*" } });
+    // fetchWithRetry kullanılıyor
+    const resp = await fetchWithRetry(url, { headers: { "User-Agent": UA, "Accept": "*/*" } });
     if (!resp.ok) throw new Error("Manifest upstream " + resp.status);
     const body = await resp.text();
     manifestCache[cacheKey] = { body, expiresAt: Date.now() + MANIFEST_CACHE_MS };
@@ -159,7 +180,8 @@ async function fetchSegmentBinary(url: string): Promise<{ body: Uint8Array; cont
   }
 
   pendingSegment[url] = (async () => {
-    const resp = await fetch(url, { headers: { "User-Agent": UA, "Accept": "*/*" } });
+    // fetchWithRetry kullanılıyor
+    const resp = await fetchWithRetry(url, { headers: { "User-Agent": UA, "Accept": "*/*" } });
     if (!resp.ok) throw new Error("Segment upstream " + resp.status);
     const ct = resp.headers.get("Content-Type") || "video/mp2t";
     const body = new Uint8Array(await resp.arrayBuffer());
